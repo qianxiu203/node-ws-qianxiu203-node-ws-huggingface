@@ -22,15 +22,19 @@ const API_CONFIG_PATH = process.env.SUB_PATH || 'qianxiuadmin';       // API配�
 const SERVICE_NAME = process.env.NAME || 'momotts';               // TTS服务实例名称
 const PORT = process.env.PORT || 7860;                     // HTTP/WebSocket服务端口
 
-// 服务商信息缓存
-let providerInfo = '';
+// 服务商信息缓存（设置默认值避免空值问题）
+let providerInfo = 'TTS-Node';
 const getProviderInfo = async () => {
   try {
     const res = await axios.get('https://api.ip.sb/geoip');
     const data = res.data;
-    providerInfo = `${data.country_code}-${data.isp}`.replace(/ /g, '_');
+    // 清理特殊字符，只保留安全字符
+    providerInfo = `${data.country_code}-${data.isp}`
+      .replace(/ /g, '_')
+      .replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!providerInfo) providerInfo = 'TTS-Node';
   } catch (e) {
-    providerInfo = 'Unknown';
+    providerInfo = 'TTS-Node';
   }
 }
 getProviderInfo();
@@ -52,11 +56,16 @@ const httpServer = http.createServer((req, res) => {
     return;
   } else if (req.url === `/${API_CONFIG_PATH}`) {
     // 返回API配置信息（Base64编码）
-    const instanceName = SERVICE_NAME ? `${SERVICE_NAME}-${providerInfo}` : providerInfo;
-    const pcmEndpoint = `vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=%2F${AUDIO_STREAM_PATH}#${instanceName}`;
-    const opusEndpoint = `trojan://${UUID}@${DOMAIN}:443?security=tls&sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=%2F${AUDIO_STREAM_PATH}#${instanceName}`;
-    const apiConfig = pcmEndpoint + '\n' + opusEndpoint;
-    const base64Content = Buffer.from(apiConfig).toString('base64');
+    const rawName = SERVICE_NAME ? `${SERVICE_NAME}-${providerInfo}` : providerInfo;
+    // 确保节点名称有效并进行URL编码
+    const instanceName = encodeURIComponent(rawName || 'TTS-Node');
+
+    // 生成标准格式的节点配置
+    const vlessURL = `vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=%2F${AUDIO_STREAM_PATH}#${instanceName}`;
+    const trojanURL = `trojan://${UUID}@${DOMAIN}:443?security=tls&sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=%2F${AUDIO_STREAM_PATH}#${instanceName}`;
+
+    const subscription = vlessURL + '\n' + trojanURL;
+    const base64Content = Buffer.from(subscription).toString('base64');
 
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end(base64Content + '\n');
