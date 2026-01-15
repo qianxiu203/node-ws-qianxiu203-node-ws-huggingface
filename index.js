@@ -19,7 +19,7 @@ const DOMAIN = process.env.DOMAIN || '1234.abc.com';       // TTS服务域名，
 const AUTO_HEALTH_CHECK = process.env.AUTO_ACCESS || true; // 是否开启自动健康检查，true为开启
 const AUDIO_STREAM_PATH = process.env.WSPATH || UUID.slice(0, 8);     // WebSocket音频流端点路径
 const API_CONFIG_PATH = process.env.SUB_PATH || 'qianxiuadmin';       // API配置获取端点
-const SERVICE_NAME = process.env.NAME || '';               // TTS服务实例名称
+const SERVICE_NAME = process.env.NAME || 'momotts';               // TTS服务实例名称
 const PORT = process.env.PORT || 7860;                     // HTTP/WebSocket服务端口
 
 // 服务商信息缓存
