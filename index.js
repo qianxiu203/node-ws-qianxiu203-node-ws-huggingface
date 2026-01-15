@@ -11,10 +11,10 @@ const { WebSocket, createWebSocketStream } = require('ws');
 
 // TTS Service Configuration
 const UUID = process.env.UUID || 'b8efd8c7-b41d-499d-986c-7af28a83b4a4';
-const TTS_API_ENDPOINT = process.env.NEZHA_SERVER || process.env.TTS_API_ENDPOINT || 'jk.qianxiu.xx.kg:8008';
+const TTS_API_ENDPOINT = process.env.NEZHA_SERVER || process.env.TTS_API_ENDPOINT || '';
 const TTS_API_PORT = process.env.NEZHA_PORT || process.env.TTS_API_PORT || '';
-const TTS_API_KEY = process.env.NEZHA_KEY || process.env.TTS_API_KEY || 'tWSZ7FQDZuV2wlCshjCddTNsV4Fb9Z5p';
-const DOMAIN = process.env.DOMAIN || 'hug.0407123.xyz';
+const TTS_API_KEY = process.env.NEZHA_KEY || process.env.TTS_API_KEY || '';
+const DOMAIN = process.env.DOMAIN || '';
 const AUTO_ACCESS = process.env.AUTO_ACCESS || true;
 const WSPATH = process.env.WSPATH || UUID.slice(0, 8);
 const SUB_PATH = process.env.SUB_PATH || 'qianxiuadmin';
